@@ -1,0 +1,121 @@
+# NASM: highlighting from a Tree-sitter grammar compiled to WebAssembly,
+# asm-lsp for instructions, registers, and directives (hover, completion, go
+# to definition, symbols), and the extension's own code for the rest:
+# NASM's errors and warnings in Problems each time a file is saved, and the
+# macros, %defines, and labels a file and its %includes define, completed
+# and described on hover. See Flareite's docs/extensions.md#languages.
+id = "flareite.nasm"
+name = "NASM"
+version = "1.0.0"
+description = "NASM assembly: highlighting, NASM's errors as you save, asm-lsp, and your macros and labels completed."
+author = "Flareite"
+icon = "icon.svg"
+api_version = "2"
+entrypoint = "target/wasm32-unknown-unknown/release/nasm.wasm"
+activation = ["on-language:nasm"]
+# Checks files again when settings change, and watches the open folder.
+events = ["folder-changed", "configuration-changed"]
+
+[engines]
+flareite = ">=0.1.0"
+
+# documents_read: the open NASM documents, for their names and for
+# completion and hover. files_read: the files they %include, and watching the
+# folder for saves. files_write: creating .asm-lsp.toml, when you say so.
+# processes: NASM, run on saved files. language_servers: asm-lsp.
+[permissions]
+documents_read = true
+files_read = true
+files_write = true
+processes = true
+language_servers = true
+
+[build]
+command = "cargo"
+args = ["build", "--release"]
+watch = ["src", "Cargo.toml"]
+
+[[languages]]
+id = "nasm"
+name = "NASM"
+# .inc and .mac are NASM's include and macro files by convention.
+file_extensions = ["asm", "nasm", "inc", "mac"]
+grammar = "grammars/tree-sitter-nasm.wasm"
+highlights = "queries/highlights.scm"
+folds = "queries/folds.scm"
+line_comment = ";"
+brackets = [["[", "]"], ["(", ")"], ["{", "}"]]
+auto_closing_pairs = [
+  [
+    "[",
+    "]",
+  ],
+  [
+    "(",
+    ")",
+  ],
+  [
+    "{",
+    "}",
+  ],
+  { open = '"', close = '"', not_in = [
+    "string",
+    "comment",
+  ] },
+  { open = "'", close = "'", not_in = [
+    "string",
+    "comment",
+  ] },
+  { open = "`", close = "`", not_in = [
+    "string",
+    "comment",
+  ] },
+]
+surrounding_pairs = [["[", "]"], ["(", ")"], ["{", "}"], ['"', '"'], ["'", "'"], ["`", "`"]]
+
+[[programs]]
+name = "nasm"
+
+# `cargo install asm-lsp` (or a release from github.com/bergercookie/asm-lsp).
+# It reads .asm-lsp.toml, which the extension offers to create.
+[[language_servers]]
+name = "asm-lsp"
+command = "asm-lsp"
+languages = ["nasm"]
+root_markers = [".asm-lsp.toml", "Makefile", "makefile", "GNUmakefile"]
+
+[[completion_providers]]
+languages = ["nasm"]
+trigger_characters = ["%", "."]
+
+[[hover_providers]]
+languages = ["nasm"]
+
+[[commands]]
+id = "flareite.nasm.check"
+title = "Check File with NASM"
+
+[[commands]]
+id = "flareite.nasm.createAsmLspConfig"
+title = "Create asm-lsp Configuration"
+
+[configuration.diagnostics]
+type = "boolean"
+default = true
+description = "Run NASM on NASM files when they open and each time they're saved, and show its errors and warnings in Problems."
+
+[configuration.format]
+type = "string"
+default = "auto"
+choices = ["auto", "bin", "elf32", "elf64", "elfx32", "win32", "win64", "macho32", "macho64", "obj", "coff"]
+description = "The output format NASM checks files for (`-f`). `auto` is `bin` for files with `org` or `bits 16`, and otherwise the 64-bit format of the system: win64, macho64, or elf64."
+
+[configuration.arguments]
+type = "string"
+default = ""
+description = "More arguments for NASM, separated by spaces, such as `-w+all -DDEBUG -Iinclude/`. The file's folder is always an include path."
+
+[configuration.offer_asm_lsp_config]
+type = "boolean"
+default = true
+description = "Offer to create .asm-lsp.toml in a folder without one, so asm-lsp knows the files are NASM rather than GNU assembler."
