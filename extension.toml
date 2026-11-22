@@ -6,7 +6,7 @@
 # and described on hover. See Flareite's docs/extensions.md#languages.
 id = "flareite.nasm"
 name = "NASM"
-version = "1.0.0"
+version = "1.0.1"
 description = "NASM assembly: highlighting, NASM's errors as you save, asm-lsp, and your macros and labels completed."
 author = "Flareite"
 icon = "icon.svg"
@@ -71,7 +71,32 @@ auto_closing_pairs = [
     "comment",
   ] },
 ]
-surrounding_pairs = [["[", "]"], ["(", ")"], ["{", "}"], ['"', '"'], ["'", "'"], ["`", "`"]]
+surrounding_pairs = [
+  [
+    "[",
+    "]",
+  ],
+  [
+    "(",
+    ")",
+  ],
+  [
+    "{",
+    "}",
+  ],
+  [
+    '"',
+    '"',
+  ],
+  [
+    "'",
+    "'",
+  ],
+  [
+    "`",
+    "`",
+  ],
+]
 
 [[programs]]
 name = "nasm"
@@ -107,13 +132,25 @@ description = "Run NASM on NASM files when they open and each time they're saved
 [configuration.format]
 type = "string"
 default = "auto"
-choices = ["auto", "bin", "elf32", "elf64", "elfx32", "win32", "win64", "macho32", "macho64", "obj", "coff"]
+choices = [
+  "auto",
+  "bin",
+  "elf32",
+  "elf64",
+  "elfx32",
+  "win32",
+  "win64",
+  "macho32",
+  "macho64",
+  "obj",
+  "coff",
+]
 description = "The output format NASM checks files for (`-f`). `auto` is `bin` for files with `org` or `bits 16`, and otherwise the 64-bit format of the system: win64, macho64, or elf64."
 
 [configuration.arguments]
 type = "string"
 default = ""
-description = "More arguments for NASM, separated by spaces, such as `-w+all -DDEBUG -Iinclude/`. The file's folder is always an include path."
+description = "More arguments for NASM, separated by spaces, such as `-w+all -DDEBUG -I include/`. NASM runs in the open folder, so relative paths are from there, as in a build. The file's folder is always an include path, and so are the `-I` paths in `.asm-lsp.toml`'s `compile_flags_txt` (when its `compiler` is NASM)."
 
 [configuration.offer_asm_lsp_config]
 type = "boolean"

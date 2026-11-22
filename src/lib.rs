@@ -3,10 +3,13 @@
 //! - **Problems from NASM.** When a NASM document opens, and each time a
 //!   file in the open folder is saved (the extension watches the folder),
 //!   NASM checks the open NASM files that are saved on disk: `nasm -X gnu
-//!   -f <format> -I <folder> <file> -o <null device>`. Its errors and
-//!   warnings go to Problems on their lines; those in an included file go
-//!   on the `%include` line, saying where. Needs a trusted folder, as every
-//!   program does.
+//!   -f <format> -I <paths> <file> -o <null device>`, in the open folder as
+//!   a build would run it. Its errors and warnings go to Problems on their
+//!   lines; those in an included file go on the `%include` line, saying
+//!   where. Needs a trusted folder, as every program does.
+//! - **Include paths** (`includes`): the file's folder, then the `-I`s of
+//!   the `arguments` setting and of `.asm-lsp.toml`'s `compile_flags_txt`,
+//!   relative to the open folder. Both the check and the symbols use them.
 //! - **Completion and hover** for what a file and the files it `%include`s
 //!   define: macros, single-line macros, `equ` constants, structures, and
 //!   labels (`symbols`), with the comments above them. asm-lsp, which the
@@ -16,6 +19,7 @@
 //!   reports gcc's errors. The extension offers once per folder to create
 //!   one for NASM, with asm-lsp's diagnostics off (NASM's come from here).
 
+mod includes;
 mod report;
 mod symbols;
 
@@ -69,8 +73,62 @@ struct Check {
   document: DocumentId,
   /// The document's version when it started, which the problems are for.
   version: u64,
-  /// Where it ran: the file's folder.
+  /// Where it ran, which the paths NASM writes are relative to.
   folder: String,
+}
+
+/// How NASM runs for a file.
+struct Setup {
+  /// The open folder, if the file is in it (as a build runs NASM there),
+  /// else the file's folder. Relative paths in arguments are from here.
+  cwd: String,
+  /// Absolute, each ending with a separator: the file's folder first.
+  includes: Vec<String>,
+  /// The `arguments` setting's arguments besides include paths.
+  rest: Vec<String>,
+}
+
+/// Where NASM runs for a file, and where it looks for included files.
+fn setup(path: &str) -> Setup {
+  let (folder, _) = split_path(path);
+  let root = workspace::folder()
+    .map(|folder| folder.path)
+    .filter(|root| includes::relative_to(path, root).is_some());
+  let cwd = root.clone().unwrap_or_else(|| folder.to_owned());
+  let arguments: Vec<String> = setting_text("arguments")
+    .split_whitespace()
+    .map(str::to_owned)
+    .collect();
+  let (mut paths, rest) = includes::split(&arguments);
+  if let Some(root) = &root
+    && let Some(relative) = includes::relative_to(path, root)
+    && let Some(config) = read(&join(root, CONFIG_FILE))
+  {
+    paths.extend(includes::from_asm_lsp(&config, relative));
+  }
+  let mut absolute = vec![includes::absolute(folder, "")];
+  for path in paths {
+    let path = includes::absolute(&cwd, &path);
+    if !absolute.iter().any(|seen| same_path(seen, &path)) {
+      absolute.push(path);
+    }
+  }
+  Setup {
+    cwd,
+    includes: absolute,
+    rest,
+  }
+}
+
+/// Finds an included file as NASM does: from where it runs, then on the
+/// include paths. Its path and text.
+fn find_include(setup: &Setup, include: &str) -> Option<(String, String)> {
+  std::iter::once(setup.cwd.as_str())
+    .chain(setup.includes.iter().map(String::as_str))
+    .find_map(|folder| {
+      let path = join(folder.trim_end_matches(['/', '\\']), include);
+      read(&path).map(|text| (path, text))
+    })
 }
 
 #[derive(Default)]
@@ -170,22 +228,16 @@ fn format_for(path: &str, text: &str) -> String {
 }
 
 /// The arguments NASM runs with for a file.
-fn arguments(path: &str, text: &str) -> Vec<String> {
-  let (folder, name) = split_path(path);
-  let separator = if is_windows_path(path) { "\\" } else { "/" };
+fn arguments(path: &str, text: &str, setup: &Setup) -> Vec<String> {
   let mut args = vec![
     "-X".into(),
     "gnu".into(),
     "-f".into(),
     format_for(path, text),
-    format!("-I{folder}{separator}"),
   ];
-  args.extend(
-    setting_text("arguments")
-      .split_whitespace()
-      .map(str::to_owned),
-  );
-  args.push(name.into());
+  args.extend(setup.includes.iter().map(|folder| format!("-I{folder}")));
+  args.extend(setup.rest.iter().cloned());
+  args.push(path.into());
   args.push("-o".into());
   args.push(
     if is_windows_path(path) {
@@ -214,6 +266,12 @@ fn diagnostics(reports: &[Report], path: &str, folder: &str, text: &str) -> Vec<
       column: line_length(&lines, line),
     },
   };
+  // Paths as NASM wrote them, which are absolute: from where it ran.
+  let shown = |file: &str| {
+    includes::relative_to(file, folder)
+      .unwrap_or(file)
+      .to_owned()
+  };
   reports
     .iter()
     .map(|report| {
@@ -227,7 +285,7 @@ fn diagnostics(reports: &[Report], path: &str, folder: &str, text: &str) -> Vec<
       } else if let Some(file) = &report.file {
         // In an included file: on the line that includes it, if there's one.
         let (_, name) = split_path(file);
-        message = format!("{file}:{}: {message}", report.line);
+        message = format!("{}:{}: {message}", shown(file), report.line);
         outline
           .includes
           .iter()
@@ -237,7 +295,7 @@ fn diagnostics(reports: &[Report], path: &str, folder: &str, text: &str) -> Vec<
         0
       };
       for (file, number, context) in &report.context {
-        message.push_str(&format!("\n{file}:{number}: {context}"));
+        message.push_str(&format!("\n{}:{number}: {context}", shown(file)));
       }
       Diagnostic {
         range: whole_line(line.min(lines.len().saturating_sub(1) as u32)),
@@ -304,21 +362,21 @@ impl Nasm {
     let Some((version, text)) = document_text(id) else {
       return;
     };
-    let (folder, _) = split_path(&path);
+    let setup = setup(&path);
     let options = ProcessOptions {
-      cwd: Some(folder.to_owned()),
+      cwd: Some(setup.cwd.clone()),
       env: Vec::new(),
       stdin: None,
       timeout_ms: Some(30_000),
     };
-    match processes::spawn("nasm", &arguments(&path, &text), &options) {
+    match processes::spawn("nasm", &arguments(&path, &text, &setup), &options) {
       Ok(process) => {
         self.checks.insert(
           process,
           Check {
             document: id,
             version,
-            folder: folder.to_owned(),
+            folder: setup.cwd,
           },
         );
         self.latest.insert(id, process);
@@ -380,10 +438,11 @@ impl Nasm {
         .iter()
         .any(|extension| lower.ends_with(extension))
     };
+    // An include file, or `.asm-lsp.toml`'s include paths.
     let included = changes.overflow
       || changes.paths.iter().any(|path| {
         let lower = path.to_ascii_lowercase();
-        lower.ends_with(".inc") || lower.ends_with(".mac")
+        lower.ends_with(".inc") || lower.ends_with(".mac") || lower.ends_with(CONFIG_FILE)
       });
     let to_check: Vec<DocumentId> = self
       .documents
@@ -456,31 +515,31 @@ impl Nasm {
     let Some((_, text)) = document_text(id) else {
       return Vec::new();
     };
-    let folder = self
-      .documents
-      .get(&id)
-      .map(|open| split_path(&open.path).0.to_owned());
+    let setup = self.documents.get(&id).map(|open| setup(&open.path));
     let mut found: Vec<(Symbol, Option<String>)> = Vec::new();
     let outline = symbols::outline(&text);
     let mut pending: Vec<(String, Outline)> = Vec::new();
-    if let Some(folder) = &folder {
+    if let Some(setup) = &setup {
       for (include, _) in &outline.includes {
-        let path = join(folder, include);
-        if let Some(text) = read(&path) {
+        if let Some((_, text)) = find_include(setup, include) {
           pending.push((include.clone(), symbols::outline(&text)));
         }
       }
     }
     found.extend(outline.symbols.into_iter().map(|symbol| (symbol, None)));
-    // Their own includes, one level further, with paths from the same folder.
+    // Their own includes, one level further, found the same way.
     let mut nested = Vec::new();
-    if let Some(folder) = &folder {
+    if let Some(setup) = &setup {
       for (_, outline) in &pending {
         for (include, _) in &outline.includes {
-          if pending.iter().any(|(seen, _)| seen == include) {
+          if pending
+            .iter()
+            .chain(&nested)
+            .any(|(seen, _)| seen == include)
+          {
             continue;
           }
-          if let Some(text) = read(&join(folder, include)) {
+          if let Some((_, text)) = find_include(setup, include) {
             nested.push((include.clone(), symbols::outline(&text)));
           }
         }
